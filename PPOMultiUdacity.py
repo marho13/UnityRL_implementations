@@ -16,7 +16,7 @@ import eventlet.wsgi
 from PIL import Image
 from flask import Flask
 from io import BytesIO
-import PPO
+import PPOMultiVariate as PPO
 from matplotlib.pyplot import imshow
 # from matplotlib.pyplot import imsave
 from scipy.misc import imsave
@@ -92,7 +92,7 @@ size = width * height * channels * repeatNum
 print(size)
 ############## Hyperparameters ##############
 state_dim = size
-action_dim = 2
+action_dim = 1
 discount = 0.99
 
 #Set by us
@@ -104,15 +104,14 @@ n_latent_var = 64  # number of variables in hidden layer
 update_timestep = 4096  # update policy every n timesteps
 
 #Change these first
-lr = 0.002
+lr = 0.0003
 betas = (0.9, 0.999)
 gamma = 0.9  # discount factor
 K_epochs = 4  # update policy for K epochs
 eps_clip = 0.2  # clip parameter for PPO
 #############################################
 
-memory = PPO.Memory()
-model = PPO.PPO(state_dim, action_dim, n_latent_var, lr, betas, gamma, K_epochs, eps_clip)
+model = PPO.PPO(state_dim, action_dim, lr, 0.001, gamma, K_epochs, eps_clip)
 print("About to load model...{}".format(file))
 
 try:
@@ -200,28 +199,36 @@ def telemetry(sid, data):
     # We need to create the image buffers, or add images to the buffer
     inputImage, imageList = o.createExperience(imageList, image)
 
+
+
     if prevImage == []:
         prevImage = inputImage
 
     if done.lower() == "true":
+        done = True
         if timestep >= update_timestep:
-            timestep, episodeReward, numEpisode, memory = train(numEpisode, prevReward, memory, timestep, episodeReward, data["reward"], prevStraight, prevNonStraight, update_timestep)
+            timestep, episodeReward, numEpisode = train(numEpisode, prevReward, model, timestep, episodeReward, data["reward"], prevStraight, prevNonStraight)
             reset()
             time.sleep(1)
             send_control(0.0, 0.0)
         else:
+            print(episodeReward[-1], timestep)
             reset()
             time.sleep(1)
             send_control(0.0, 0.0)
+    else:
+        done = False
+
+    model.buffer.rewards.append(prevReward)
+    model.buffer.is_terminals.append(done)
 
     reward = 0.0
 
     #perform action in here, then update the reward and image
-    action = model.policy_old.act(inputImage, memory)
+    action = model.select_action(inputImage)
     # actionMax = np.argmax(action)
     # action = o.actionTranslation(actionMax)
-
-    send_control(action[0], action[1])
+    send_control(action[0], 1.0)
 
     #Temp way to update reward, so that the asynchronous part of the task does not ruin progress
     if checkpointStraight > prevStraight:
@@ -235,9 +242,9 @@ def telemetry(sid, data):
     reward += onRoadFunc(onRoad, int(checkpointStraight)+int(checkpointNonStraight))
 
     # Saving reward:
-    memory.onRoads.append(onRoad)
-    memory.rewards.append(reward)
-    memory.images.append(image)
+    # memory.onRoads.append(onRoad)
+    # memory.rewards.append(reward)
+    # memory.images.append(image)
 
     episodeReward[-1] += reward
     prevReward = reward
@@ -273,25 +280,24 @@ def send_control(steering_angle, throttle):
         },
         skip_sid=True)
 
-def train(numEpisode, reward, memory, timestep, episodeReward, datarew, prevStraight, prevNon, update_timestep):
+def train(numEpisode, reward, model, timestep, episodeReward, datarew, prevStraight, prevNon):
     numEpisode += 1
     episodeReward[-1] += reward
     print("episode: {}, gave a reward of {}, with the last reward being {} over {} actions with {}".format(
         len(episodeReward), episodeReward[-1], datarew, timestep, (prevStraight + prevNon)))
 
-    model.update(memory)
-    memory.clear_memory()
+    model.update()
 
     episodeReward.append(0.0)
     timestep = 0
 
     if ((len(episodeReward))+fileMax) % 50 == 0 and len(episodeReward)>1:
-        torch.save(model.policy.state_dict(), './PPO_road_{}.pth'.format(len(episodeReward) + fileMax))
+        model.save('./PPO_road_{}.pth'.format(len(episodeReward) + fileMax))
         writer = open("rewards.txt", mode="a")
         [writer.write(str(rew) + "\n") for rew in episodeReward[-50:]]
         print("saving!")
 
-    return timestep, episodeReward, numEpisode, memory
+    return timestep, episodeReward, numEpisode
 
 def onRoadFunc(onRoad, numCheckpoints):
     if str(onRoad) == "True":

@@ -1,14 +1,11 @@
 import utils
-import argparse
 import base64
-from datetime import datetime
-import os
-import time
-import shutil
 import sys
 import torch
 import os
+import time
 from torch.autograd import Variable
+
 import numpy as np
 import socketio
 import eventlet
@@ -16,10 +13,9 @@ import eventlet.wsgi
 from PIL import Image
 from flask import Flask
 from io import BytesIO
-import PPO
-from matplotlib.pyplot import imshow
-# from matplotlib.pyplot import imsave
-from scipy.misc import imsave
+import DQN
+from prioritisedExperienceReplay import Memory
+
 
 def lastCheckpoint(listy):
     maxInd = 0
@@ -39,6 +35,7 @@ def lastCheckpoint(listy):
     if maxInd > 0:
         return listy[index], maxInd
     return None, 0
+
 
 def removeNonCheck(files):
     for f in range(len(files) - 1, -1, -1):
@@ -92,7 +89,7 @@ size = width * height * channels * repeatNum
 print(size)
 ############## Hyperparameters ##############
 state_dim = size
-action_dim = 2
+action_dim = 15
 discount = 0.99
 
 #Set by us
@@ -101,7 +98,7 @@ log_interval = 20  # print avg reward in the interval
 max_episodes = 50000  # max training episodes
 max_timesteps = 3000  # max timesteps in one episode
 n_latent_var = 64  # number of variables in hidden layer
-update_timestep = 4096  # update policy every n timesteps
+update_timestep = 3000  # update policy every n timesteps
 
 #Change these first
 lr = 0.002
@@ -111,26 +108,16 @@ K_epochs = 4  # update policy for K epochs
 eps_clip = 0.2  # clip parameter for PPO
 #############################################
 
-memory = PPO.Memory()
-model = PPO.PPO(state_dim, action_dim, n_latent_var, lr, betas, gamma, K_epochs, eps_clip)
+memory = Memory(capacity=7000)
+model = DQN.DQN(state_dim, action_dim, n_latent_var, lr, betas, gamma)
 print("About to load model...{}".format(file))
 
 try:
-    model.policy.load_state_dict(torch.load(file))
-    model.policy_old.load_state_dict(torch.load(file))
+    model.target_net.load_state_dict(torch.load(file))
+    model.policy_net.load_state_dict(torch.load(file))
     print("Loaded file: {}", file)
 except:
     print("Couldn't load checkpoint")
-
-# print("Did it work?")
-# with tf.device('/gpu:1'):
-#     roadDetection = tf.keras.applications.MobileNet(input_shape=(66, 200, 3), weights=None, classes=1)
-#     SGD = keras.optimizers.SGD(lr=0.01, decay=1e-6)
-#     roadDetection.compile(optimizer='SGD', loss='mean_squared_error', metrics=['accuracy'])
-
-# print(model.policy.state_dict())
-# print(model.policy_old.state_dict())
-# print(model.optimizer.state_dict())
 
 def reshaper(imgs, num, directory):
     imgs = np.asarray(imgs)/256
@@ -148,6 +135,7 @@ class Operations:
 
     #Adds Image to the front, removing from the back of the array
     def addImage(self, imageList, image):
+        pass
         #Insert to the front, delete back image
         imageList = np.insert(imageList, 0, image)
         del imageList[size/repeatNum:]
@@ -181,21 +169,34 @@ class Operations:
         else:
             return reward
 
+    def append_sample(self, model, state, action, reward, next_state, done, memory, target_model):
+        global discount
+        target = model(Variable(torch.FloatTensor(state))).data
+        old_val = target[action]
+        target_val = target_model(Variable(torch.FloatTensor(next_state))).data
+        if done.lower() == "true":
+            target[action] = reward
+        else:
+            target[action] = reward + discount * torch.max(target_val)
+
+        error = abs(old_val - target[action]) + 0.00001
+
+        memory.add(error, (torch.from_numpy(state), torch.tensor([action]), torch.from_numpy(next_state), torch.tensor([reward])))
+
 o = Operations()
 
 @sio.on('telemetry')
 def telemetry(sid, data):
     global speed_limit, numActions, actionsTaken, episodeReward, endEpisode, prevStraight, \
         prevNonStraight, numEpisode, o, timestep, roadDetection, prevDist, \
-        offRoadList, updateImages, num1, num0, imageList, prevImage, prevAction, prevReward, memory
+        offRoadList, updateImages, num1, num0, imageList, prevImage, prevAction, prevReward
 
     timestep += 1
     image = o.createImage(data['image'])
-
+    done = str(data["resetEnv"])
     checkpointStraight = int(data["checkpointStraight"])
     checkpointNonStraight = int(data["checkpointNonStraight"])
     onRoad = (data["onRoad"])
-    done = str(data["resetEnv"])
 
     # We need to create the image buffers, or add images to the buffer
     inputImage, imageList = o.createExperience(imageList, image)
@@ -203,9 +204,12 @@ def telemetry(sid, data):
     if prevImage == []:
         prevImage = inputImage
 
+    if type(prevAction) != type(None):
+        o.append_sample(model.policy_net, prevImage, prevAction, prevReward, inputImage, done, memory, model.target_net)
+
     if done.lower() == "true":
         if timestep >= update_timestep:
-            timestep, episodeReward, numEpisode, memory = train(numEpisode, prevReward, memory, timestep, episodeReward, data["reward"], prevStraight, prevNonStraight, update_timestep)
+            timestep, episodeReward, numEpisode = train(numEpisode, prevReward, memory, timestep, episodeReward, data["reward"], prevStraight, prevNonStraight, update_timestep)
             reset()
             time.sleep(1)
             send_control(0.0, 0.0)
@@ -215,13 +219,12 @@ def telemetry(sid, data):
             send_control(0.0, 0.0)
 
     reward = 0.0
-
     #perform action in here, then update the reward and image
-    action = model.policy_old.act(inputImage, memory)
-    # actionMax = np.argmax(action)
-    # action = o.actionTranslation(actionMax)
+    action = model.policy_net.act(inputImage)
+    actionMax = o.argMax(action)
+    actionTranslated = o.actionTranslation(actionMax)
 
-    send_control(action[0], action[1])
+    send_control(actionTranslated, 1.0)
 
     #Temp way to update reward, so that the asynchronous part of the task does not ruin progress
     if checkpointStraight > prevStraight:
@@ -232,15 +235,20 @@ def telemetry(sid, data):
 
     reward -= 0.01
 
-    reward += onRoadFunc(onRoad, int(checkpointStraight)+int(checkpointNonStraight))
+    reward += onRoadFunc(onRoad, int(checkpointStraight) + int(checkpointNonStraight))
 
-    # Saving reward:
-    memory.onRoads.append(onRoad)
-    memory.rewards.append(reward)
-    memory.images.append(image)
+
+    # if int(checkpointNonStraight) + int(checkpointStraight) > 5:
+    #     reward += 0.01*((int(checkpointNonStraight)+int(checkpointStraight))//5)
+
+    prevStraight = checkpointStraight
+    prevNonStraight = checkpointNonStraight
 
     episodeReward[-1] += reward
     prevReward = reward
+    prevImage = inputImage
+    prevAction = actionMax
+    # prevAction = actionMax
     prevStraight = checkpointStraight
     prevNonStraight = checkpointNonStraight
 
@@ -273,26 +281,6 @@ def send_control(steering_angle, throttle):
         },
         skip_sid=True)
 
-def train(numEpisode, reward, memory, timestep, episodeReward, datarew, prevStraight, prevNon, update_timestep):
-    numEpisode += 1
-    episodeReward[-1] += reward
-    print("episode: {}, gave a reward of {}, with the last reward being {} over {} actions with {}".format(
-        len(episodeReward), episodeReward[-1], datarew, timestep, (prevStraight + prevNon)))
-
-    model.update(memory)
-    memory.clear_memory()
-
-    episodeReward.append(0.0)
-    timestep = 0
-
-    if ((len(episodeReward))+fileMax) % 50 == 0 and len(episodeReward)>1:
-        torch.save(model.policy.state_dict(), './PPO_road_{}.pth'.format(len(episodeReward) + fileMax))
-        writer = open("rewards.txt", mode="a")
-        [writer.write(str(rew) + "\n") for rew in episodeReward[-50:]]
-        print("saving!")
-
-    return timestep, episodeReward, numEpisode, memory
-
 def onRoadFunc(onRoad, numCheckpoints):
     if str(onRoad) == "True":
         return 0.0
@@ -302,6 +290,33 @@ def onRoadFunc(onRoad, numCheckpoints):
             return -0.01
         else:
             return -0.001
+
+def train(numEpisode, reward, memory, timestep, episodeReward, datarew, prevStraight, prevNon, update_timestep):
+    model.update(memory, batchSize, update_timestep)
+
+    numEpisode += 1
+    episodeReward[-1] += reward
+
+    print("episode: {}, gave a reward of {}, with the last reward being {} over {} actions with {}".format(len(episodeReward), episodeReward[-1], datarew, timestep, (prevStraight+prevNon)))
+
+    episodeReward.append(0.0)
+    timestep = 0
+
+    if ((len(episodeReward))+fileMax) % 50 == 0 and len(episodeReward)>1:
+        torch.save(model.target_net.state_dict(), './PPO_road_{}.pth'.format(len(episodeReward) + fileMax))
+        writer = open("rewards.txt", mode="a")
+        [writer.write(str(rew) + "\n") for rew in episodeReward[-50:]]
+        print("saving!")
+
+    return timestep, episodeReward, numEpisode
+
+def onRoad(onRoad):
+    if str(onRoad) == "True":
+        return 0.0
+
+    else:
+        return -0.01
+
 
 if __name__ == '__main__':
     # wrap Flask application with engineio's middleware

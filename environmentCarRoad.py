@@ -1,4 +1,4 @@
-import utils
+#import utils
 import argparse
 import base64
 from datetime import datetime
@@ -19,26 +19,26 @@ import eventlet.wsgi
 from PIL import Image
 from flask import Flask
 from io import BytesIO
-import PPO
+#import PPO
 import DQN
 from matplotlib.pyplot import imshow
 # from matplotlib.pyplot import imsave
 from scipy.misc import imsave
-from torchsummary import summary
+#from torchsummary import summary
 
 def lastCheckpoint(listy):
     max = 0
     index = 0
     for a in range(len(listy)):
-        if int(listy[a][8:-4]) > max:
-            max = int(listy[a][8:-4])
+        if int(listy[a][4:-4]) > max:
+            max = int(listy[a][4:-4])
             index = a
     print(max, index)
     return listy[index], max
 
 def removeNonCheck(files):
     for f in range(len(files) - 1, -1, -1):
-        if files[f][:8] == "DQN_road123":
+        if files[f][:4] == "DQN_":
             pass
         else:
             del files[f]
@@ -56,10 +56,8 @@ files = (os.listdir())
 files = removeNonCheck(files)
 files.sort()
 # print(files)
-maxInd = 0
 try:
     file, maxInd = lastCheckpoint(files)
-    # print(file)
     # print(file)
     loadingBool = True
 except:
@@ -116,22 +114,14 @@ model = DQN.DQN(state_dim, action_dim, n_latent_var, lr, betas, gamma, K_epochs,
 print("About to load model...")
 if loadingBool:
     try:
-        print(file)
-        ## DQN
-        model.policy_net.load_state_dict(torch.load(file))
-        model.target_net.load_state_dict(torch.load(file))
-
-        ## PPO
-        # model.policy.load_state_dict(torch.load(file))
-        # model.policy_old.load_state_dict(torch.load(file))
-        print("Loaded file: {}".format(file))
-    except Exception as e:
+        model.policy.load_state_dict(torch.load(file))
+        model.policy_old.load_state_dict(torch.load(file))
+        print("Loaded file: {}", file)
+    except:
         print("Couldn't load checkpoint")
-        print(e)
 else:
     print("Not loading a file, seems the checkpoint isn't there")
     # print(model.policy_net)
-
 # print("Did it work?")
 # with tf.device('/gpu:1'):
 #     roadDetection = tf.keras.applications.MobileNet(input_shape=(66, 200, 3), weights=None, classes=1)
@@ -144,14 +134,14 @@ else:
 
 def reshaper(imgs):
     imgs = np.asarray(imgs)/256
-    imgs = np.reshape(imgs, newshape=(66, 200, 3))
+    imgs = np.reshape(imgs, newshape=(160, 320, 3))
     # imsave("{}/{}.png".format(directory, num), imgs)
     return imgs
 
 
 class Operations:
     def actionTranslation(self, action):#0-6 = -, 7 = 0, 8-14 = +
-        # action = np.argmax(action)
+        action = np.argmax(action)
         dicty = {0:-0.77, 1:-0.66, 2:-0.55, 3:-0.44, 4:-0.33, 5:-0.22, 6:-0.11, 7:0.0, 8:0.11, 9:0.22, 10:0.33, 11:0.44, 12:0.55, 13:0.66, 14:0.77}
         return dicty[action]
 
@@ -163,9 +153,7 @@ class Operations:
             output = np.array(output)  # the model expects 4D array
             # output = np.array(output.flatten())
             output = np.asarray(output)/256
-            # output = np.moveaxis(output, 0, 2)
-            # return np.resize(output, new_shape=(1, 3, 224, 224))
-            return np.reshape(output, newshape=(66, 200, 3))
+            return output
 
         except Exception as e:
             print(e)
@@ -173,7 +161,7 @@ class Operations:
 
     def checkReward(self, reward):
         if reward == 0.0:
-            return -0.0001
+            return -0.001
         else:
             return reward
 
@@ -188,107 +176,65 @@ def telemetry(sid, data):
     global speed_limit, numActions, actionsTaken, episodeReward, endEpisode, prevStraight, \
         prevNonStraight, numEpisode, o, timestep, roadDetection, prevDist, \
         offRoadList, updateImages, num1, num0, state, next_state
+
+    timestep += 1
+    next_state = o.createImage(data['image'])
+    if state == []:
+        state = o.createImage(data['image'])
+    # next_state = reshaper(next_state)
+    # state = reshaper(state)
+    checkpointStraight = int(data["checkpointStraight"])
+    checkpointNonStraight = int(data["checkpointNonStraight"])
+    onRoad = (data["onRoad"])
+
+    reward = 0.0
+
+    #perform action in here, then update the reward and image
+    action = model.policy_net.act(state)
+    action = action.cpu().detach().numpy()
+    # if len(action) > 1:
+    maxaction = float(np.argmax(action))
+    # else:
+    #     maxaction = float(action[0])
+    translatedaction = o.actionTranslation(int(maxaction))
+
+    send_control(translatedaction, 1.0)
+
+    #Temp way to update reward, so that the asynchronous part of the task does not ruin progress
+    if checkpointStraight > prevStraight:
+        reward += 2.0
+
+    if checkpointNonStraight > prevNonStraight:
+        reward += 4.0
+
+    reward -= 0.001
     done = str(data["resetEnv"])
-    if done.lower() != "true":
-        timestep += 1
-        next_state = o.createImage(data['image'])
-        if state == []:
-            state = o.createImage(data['image'])
-        # state = o.createImage(data['image'])
-        # next_state = reshaper(next_state)
-        # state = reshaper(state)
-        checkpointStraight = int(data["checkpointStraight"])
-        checkpointNonStraight = int(data["checkpointNonStraight"])
-        onRoad = (data["onRoad"])
 
-        reward = 0.0
+    if int(checkpointNonStraight)+int(checkpointStraight)> 5:
+        reward += 0.01*((int(checkpointNonStraight)+int(checkpointStraight))//5)
 
-        #perform action in here, then update the reward and image
-        action = model.policy_net.act(state) #DQN
-        # action = model.policy_old.act(state, memory) # PPO
-        # print(action)
-        # action = action.cpu().detach().numpy()
-        # if len(action) > 1:
-        maxaction = float(np.argmax(action))
-        # print(maxaction)
-        # else:
-        #     maxaction = float(action[0])
-        translatedaction = o.actionTranslation(int(maxaction))
-        # print(translatedaction)
-        send_control(translatedaction, 0.75)
+    prevStraight = checkpointStraight
+    prevNonStraight = checkpointNonStraight
 
-        #Temp way to update reward, so that the asynchronous part of the task does not ruin progress
-        if checkpointStraight > prevStraight:
-            reward += 2.0
-
-        if checkpointNonStraight > prevNonStraight:
-            reward += 4.0
-
+    # if str(onRoad) == "True":
+    #     image = reshaper(state, num1, "1")
+    #     num1+=1
+    #
+    # else:
+    #     image = reshaper(image, num0, "0")
+    #     num0+=1
+    #     reward -= 0.01
+    if str(onRoad) == "False":
         reward -= 0.01
-        done = str(data["resetEnv"])
 
-        if int(checkpointNonStraight)+int(checkpointStraight)> 5:
-            reward += 0.01*((int(checkpointNonStraight)+int(checkpointStraight))//5)
-
-        prevStraight = checkpointStraight
-        prevNonStraight = checkpointNonStraight
-
-        # if str(onRoad) == "True":
-        #     image = reshaper(state, num1, "1")
-        #     num1+=1
-        #
-        # else:
-        #     image = reshaper(image, num0, "0")
-        #     num0+=1
-        #     reward -= 0.01
-        if str(onRoad) == "False":
-            reward -= 0.0001
-
-        # memory.push(Experience(torch.tensor(state), torch.tensor([action]), torch.tensor(next_state), torch.tensor([reward])))
-        # print(state, action, next_state, reward)
-        ##DQN Memory
-        if (len(episodeReward)+1)%3 == 0:
-            if done.lower() != "true":
-                memory.push(Experience(torch.tensor(state), action, torch.tensor(next_state), torch.tensor([reward])))
-            else:
-                memory.push(Experience(torch.tensor(state), action, None, torch.tensor([reward])))
-        episodeReward[-1] += reward
-
-        state = next_state
-
+    if done.lower() != "true":
+        memory.push(Experience(torch.tensor(state), torch.tensor([action]), torch.tensor(next_state), torch.tensor([reward])))
     else:
-        episodeReward.append(0.0)
-        checkpointStraight = 0
-        checkpointNonStraight = 0
-        # update if its time
+        memory.push(Experience(torch.tensor(state), torch.tensor([action]), None, torch.tensor([reward])))
 
+    episodeReward[-1] += reward
 
-
-        numEpisode += 1
-        print(
-            "episode: {}, gave a reward of {}, with the last reward being {} over {} actions".format((len(episodeReward)-2 + maxInd),
-                                                                                                     episodeReward[-2],
-                                                                                                     data["reward"],
-                                                                                                     timestep))
-        if (len(episodeReward)+1)%3 == 0 and memory.can_provide_sample(update_timestep):  # create timestep at the start #could store number of timesteps for each episode, which helps show how far you got
-            model.update(memory, update_timestep)
-            model.update(memory, update_timestep)
-        print("Random actions taken: {}".format(model.policy_net.randPolicy["Rand"]))
-        print("Policy actions taken: {}".format(model.policy_net.randPolicy["Policy"]))
-        model.policy_net.randPolicy["Rand"] = 0
-        model.policy_net.randPolicy["Policy"] = 0
-        timestep = 0
-        if (len(episodeReward)) % 500 == 0 and len(episodeReward) > 1:
-            torch.save(model.policy_net.state_dict(), './DQN_road{}.pth'.format(len(episodeReward) + maxInd))
-            writer = open("rewards.txt", mode="a")
-            [writer.write(str(rew) + "\n") for rew in episodeReward[-100:]]
-            print("saving!")
-        send_control(0.0, 0.0)
-
-    ##PPO memory
-    # memory.onRoads.append(onRoad)
-    # memory.rewards.append(reward)
-    # memory.images.append(state)
+    state = next_state
 
 
     # update if its time
@@ -298,6 +244,25 @@ def telemetry(sid, data):
 
         # memory.clear_memory()
 
+    if done.lower() == "true":
+        # update if its time
+        if memory.can_provide_sample(update_timestep):  # create timestep at the start #could store number of timesteps for each episode, which helps show how far you got
+            model.update(memory, update_timestep)
+
+        numEpisode += 1
+        episodeReward[-1] += reward
+        print("episode: {}, gave a reward of {}, with the last reward being {} over {} actions".format(len(episodeReward), episodeReward[-1], data["reward"], timestep))
+        # print("Random actions taken: {}".format(model.policy_net.randPolicy["Rand"]))
+        # print("Policy actions taken: {}".format(model.policy_net.randPolicy["Policy"]))
+        # model.policy_net.randPolicy["Rand"] = 0
+        # model.policy_net.randPolicy["Policy"] = 0
+        episodeReward.append(0.0)
+        timestep = 0
+        if (len(episodeReward)) % 500 == 0 and len(episodeReward) > 1:
+            torch.save(model.policy_net.state_dict(), './DQN_{}.pth'.format(len(episodeReward)+maxInd))
+            writer = open("DQNUnityrew.csv", mode="a")
+            [writer.write(str(rew) + "\n") for rew in episodeReward[-500:]]
+            print("saving!")
     prevStraight = checkpointStraight
     prevNonStraight = checkpointNonStraight
 

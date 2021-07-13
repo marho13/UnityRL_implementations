@@ -38,11 +38,7 @@ def actionRecreator(action):
     return dicty[action]
 
 def resizer(img):
-    img = cv2.cvtColor(img, cv2.COLOR_RGB2RGBA)
-    img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
-    img = cv2.resize(img, dsize=(224, 224))
-    img = np.rollaxis(img, 2, 0)
-    return np.resize(img, new_shape=(1, 3, 224, 224))
+    return cv2.resize(img[0], dsize=(224, 224))
 
 # def predict(img):
 #     with tf.device('/device:gpu:1'):
@@ -72,12 +68,11 @@ max_timesteps = 3000
 update_timestep = 50
 timestep = 0
 
-shapey = (224,224)
+shapey = 96*96*3
 
 episodeRew = 0.0
 
-# obsflat = np.array([np.array(obs).flatten()])
-obs = resizer(obs)
+obsflat = np.array([np.array(obs).flatten()])
 memory = PPO.Memory()
 model = PPO.PPO(shapey, 13, n_latent_var, lr, betas, gamma, K_epochs, eps_clip)
 
@@ -96,18 +91,20 @@ model = PPO.PPO(shapey, 13, n_latent_var, lr, betas, gamma, K_epochs, eps_clip)
 # roadDetection.compile(optimizer=Nadam, loss='mean_squared_error', metrics=['accuracy'])
 # roadDetection.load_weights("gym.h5")
 
+print(env.observation_space)
+
 actionNumber = randomGenerator()
 action = [[0.0, 1.0, 0.0]]
 for episode in range(inc, numEpisodes+inc):
     start = time.time()
     while not dones:
-        action = model.policy_old.act(obs, memory)
+        action = model.policy_old.act(obsflat[0], memory)
         action = actionRecreator(np.argmax(action))
         action = np.array([action])
 
         obs, rewards, dones, info = env.step(action)
-        # obsflat = np.array([np.array(obs).flatten()])
-        obs = resizer(obs)
+        obsflat = np.array([np.array(obs).flatten()])
+        # obs = resizer(obs)
         # pred = predict(obs)
 
         # if np.argmax(pred[0]) == 0:
